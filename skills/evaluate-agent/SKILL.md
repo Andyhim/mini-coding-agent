@@ -56,12 +56,14 @@ redefine them. Use the environment `env` only through:
         for up to 100 steps, until s is terminal:
             choose a with epsilon-greedy: a random action with probability
                 epsilon, otherwise an action with the highest Q(s, a)
-            sample s2 from the env.transition(s, a) outcomes
+            sample s2 from env.transition(s, a), using its probabilities
+                as weights (80% intended, 10% each perpendicular side)
             r = env.get_reward(s2)
             if s2 is terminal: target = r
             else: target = r + gamma * max over a2 of Q(s2, a2)
             Q(s, a) = Q(s, a) + alpha * (target - Q(s, a))
             s = s2
+            if s is terminal: end this episode
     policy(s) = the action with the highest Q(s, a)
 
 ## Steps
@@ -73,16 +75,19 @@ redefine them. Use the environment `env` only through:
    - The target uses the max over the next state's actions (not the next
      action actually taken, which would be SARSA).
    - A terminal next state adds no future value.
-   - The next state is sampled from `env.transition`, not assumed to be the
-     intended cell.
+   - The next state is sampled using the probabilities from
+     `env.transition(s, a)` as weights. It is not picked uniformly from the
+     outcomes, and not assumed to be the intended cell.
+   - The episode stops as soon as `s` is terminal (goal or trap), or after
+     100 steps.
    - All four actions are possible in every non-terminal state.
-   - Q keeps its values across episodes, and each episode stops after 100
-     steps.
+   - Q keeps its values across episodes.
    - Each update uses the right `s`, `a`, `r`, and `s2`.
    - The policy picks the highest-valued action in each state.
-2. Experiment: run this with run_shell and `"timeout": 120`:
+2. Experiment: run the script with exactly this tool call. Keep
+   `"timeout":120`, because the default of 20 seconds is too short:
 
-       py -3 skills/evaluate-agent/scripts/evaluate.py --seeds 5
+       <tool>{"name":"run_shell","args":{"command":"py -3 skills/evaluate-agent/scripts/evaluate.py --seeds 5","timeout":120}}</tool>
 
    Start with the script's default settings, plus any settings the user
    gave. If it prints `ERROR:`, fix `lab4_solution.py` and run it again. To
