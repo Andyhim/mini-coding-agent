@@ -46,6 +46,10 @@ triggers: review, pull request, diff, code review
 
 **R-FMT-4** Parsing MUST NOT require any third-party library (no PyYAML).
 
+**R-FMT-5** Unknown frontmatter keys MUST be ignored. This lets a Claude Code skill keep keys such as `disable-model-invocation` without changing how this agent treats it. The component MUST NOT do argument substitution (such as Claude Code's `$ARGUMENTS`), so a ported skill must not depend on it.
+
+**R-FMT-6** A skill folder MAY contain other files, such as `scripts/evaluate.py`. The component does not run or load them. The instruction body refers to them by workspace-relative path, and the agent runs them with the existing tools (`run_shell`), under the normal approval policy. This keeps intend.md §5 true: the component adds no special support for bundled scripts.
+
 ---
 
 ## 3. Functional requirements
@@ -56,7 +60,7 @@ triggers: review, pull request, diff, code review
 
 **R-DISC-2** A folder without a `SKILL.md` MUST be skipped silently.
 
-**R-DISC-3** If no skills are found, the agent MUST behave exactly like the original agent: no `use_skill` tool, and the catalog shows `- none`.
+**R-DISC-3** If no skills are found, the agent MUST behave exactly like the original agent: no `use_skill` tool, the catalog shows `- none`, and nothing is written to `skills.log`.
 
 ### 3.2 Prompt-triggered activation (→ S2, S3)
 
@@ -140,12 +144,12 @@ Follow these instructions step by step:
 
 | Test (`tests/test_skills.py`) | Requirements | Criterion |
 |-------------------------------|--------------|-----------|
-| `test_discovers_skill_folder` | R-DISC-1, R-TOOL-1, R-EXEC-1 | S1 |
-| `test_prompt_triggers_skill_and_logs` | R-TRIG-1–4, R-EXEC-2, R-LOG-2, R-LOG-3 | S2, S5 |
+| `test_discovers_skill_folder` | R-FMT-1, R-FMT-5, R-DISC-1–3, R-TOOL-1, R-TOOL-2, R-EXEC-1 | S1 |
+| `test_prompt_triggers_skill_and_logs` | R-TRIG-1–4, R-EXEC-2, R-EXEC-3, R-LOG-1–3 | S2, S5 |
 | `test_unrelated_prompt_does_not_trigger` | R-TRIG-4, R-TRIG-5, R-LOG-2 | S3 |
-| `test_agent_can_invoke_skill_mid_task` | R-TOOL-1–4, R-LOG-3 | S4 |
+| `test_agent_can_invoke_skill_mid_task` | R-TOOL-1–4, R-FMT-5, R-LOG-3 | S4 |
 | Existing `tests/test_mini_coding_agent.py` | R-NF-2 | S6 |
-| Live Lab 4 run (documented in `report.md`) | all | S7 |
+| Live Lab 4 run (documented in `report.md`) | all, R-LAB-1–5 | S7 |
 
 ---
 
@@ -155,4 +159,22 @@ Follow these instructions step by step:
 - **Explicit-mention matching is a substring check:** A skill with a very short name could match by accident inside unrelated words. Use descriptive, hyphenated names.
 - **Skills are sticky within a run:** In interactive mode, a skill stays active on later unrelated requests until another one replaces it. A future version could clear the active skill when a new request scores below the threshold.
 - **Active skill is not saved with the session:** On `--resume`, the skill is chosen again by the next prompt.
+- **Skills are found only inside the workspace:** The agent scans the `--cwd` workspace, not this repo. To use a skill from this repo on another project, copy its folder into that project's `skills/` (see R-LAB-4).
+- **Child agents run their own similarity check:** A `delegate` child is a full `MiniAgent`, so its task is also checked and logged with `source: "prompt"`. Read consecutive entries with that in mind.
 - **Small local models** may not follow skill steps faithfully. This is model behavior, not a component defect, and it is recorded in `report.md`.
+
+---
+
+## 7. Lab 4 run with the Lab 5 skill (→ S7)
+
+Lab 4 asks for tabular Q-learning for the vacuum agent in `vacuum_world_lab3.ipynb` (the AIMA vacuum-world repo). Lab 5 produced the Claude Code skill `.claude/skills/evaluate-agent/`, which reviews the Q-learning code, runs `scripts/evaluate.py`, and checks a "learned" definition. These requirements cover porting that skill and the live run.
+
+**R-LAB-1** The Lab 5 skill MUST be ported to `skills/evaluate-agent/` as an **evaluate-and-fix loop**. It keeps the Lab 5 review checklist, experiment script, "learned" definition, and summary format. It adds one rule: if the solution is missing, or fails the review or the "learned" check, the agent writes or fixes it and then evaluates again.
+
+**R-LAB-2** The agent MUST write its Q-learning code to `lab4_solution.py` in the workspace root. The notebook MUST NOT be edited, since a small model can't reliably patch 61 KB of notebook JSON.
+
+**R-LAB-3** `SKILL.md` MUST contain the environment description from the Lab 5 version of the project's CLAUDE.md, the reference Q-learning pseudocode from the Lab 5 `algorithm-reviewer`, and the interface the experiment script calls: `q_learning(env, n_episodes, alpha, epsilon)` returning `(q, policy)`. It MUST NOT contain a Q-learning implementation. As in Lab 5, hyperparameter values come only from the experiment step (the script's defaults and one-at-a-time changes).
+
+**R-LAB-4** The experiment script MUST run the notebook's Lab 3 code cells, then `lab4_solution.py`, and compare the result with `value_iteration`. It MUST use only packages that are already installed (the standard library and numpy).
+
+**R-LAB-5** The live run MUST happen in a separate clone of the vacuum-world repo, checked out at the Lab 4 starting commit, with no git remote. The run uses `--approval auto`, so this keeps the model from pushing anywhere.
