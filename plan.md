@@ -46,8 +46,7 @@ The skills component is added as **component 7**, next to the six existing ones 
 | `mini_coding_agent.py` | New section 7 (helpers, `Skill`, `SkillRegistry`), plus small hooks in `MiniAgent` | +~150 lines |
 | `tests/test_skills.py` | **New** — 4 acceptance tests | ~120 lines |
 | `skills/evaluate-agent/SKILL.md` | **New** — the Lab 5 skill, ported (§9) | — |
-| `skills/evaluate-agent/scripts/evaluate.py` | **New** — the Lab 5 experiment script, adapted (§9.2) | ~130 lines |
-| `skills/pr-review/SKILL.md` | **New** — the spec's example skill. It gives the similarity check a second candidate, so the log shows the matcher choosing between skills instead of scoring one. | ~10 lines |
+| `skills/evaluate-agent/scripts/evaluate.py` | **New** — the Lab 5 experiment script, adapted (§9.2) | ~180 lines |
 | `report.md`, `logs/lab4-run.jsonl` | **New** — live-run write-up and the copied `skills.log` lines | — |
 | `.gitignore` | No change. `.mini-coding-agent` is already ignored, so `skills.log` won't be committed. Copy the relevant log lines into `logs/lab4-run.jsonl` as evidence. | — |
 
@@ -123,7 +122,7 @@ Each change is small and leaves existing behavior alone when there are no skills
 3. Add `Skill` and `SkillRegistry` (§3.2–3.3).
 4. Add hooks H1, H6 and H7, then H2–H5.
 5. Run the full suite. Target: **22 passed, 1 skipped** (18 existing + 4 new).
-6. Port the Lab 5 skill to `skills/evaluate-agent/` (§9) and add `skills/pr-review/SKILL.md`. Check that the adapted `evaluate.py` still reproduces the Lab 5 baseline when it's given the Lab 5 solution code (§9.2).
+6. Port the Lab 5 skill to `skills/evaluate-agent/` (§9). It is the only skill in `skills/`. Check that the adapted `evaluate.py` still reproduces the Lab 5 baseline when it's given the Lab 5 solution code (§9.2).
 7. Do the live Lab 4 run with Ollama (§10) and capture `skills.log` for `report.md`.
 
 ---
@@ -181,7 +180,7 @@ SDLC: intent + specification + plan       intend.md, spec.md, plan.md   (4a460d2
 docs: refine spec and plan for Lab 4/5    spec.md, plan.md
 test: skills acceptance tests             tests/test_skills.py          (red)
 feat: agent skills component              mini_coding_agent.py          (green)
-feat: port lab 5 evaluate-agent skill     skills/evaluate-agent/, skills/pr-review/
+feat: port lab 5 evaluate-agent skill     skills/evaluate-agent/
 docs: lab 4 run + report                  report.md, logs/lab4-run.jsonl
 ```
 
@@ -208,6 +207,8 @@ docs: lab 4 run + report                  report.md, logs/lab4-run.jsonl
 - `REPO_ROOT` goes up **3** levels (`skills/evaluate-agent/scripts/`) instead of 4 (`.claude/skills/evaluate-agent/scripts/`).
 - After running the notebook's Lab 3 code cells, it also runs `lab4_solution.py` in the same namespace. If the file is missing or fails to import, it prints a short, clear error instead of a long traceback, so the agent can act on it.
 - It defines `goal_rate` and `mean_steps` itself. In Lab 5, `goal_rate` was part of the solution cells, so the agent now only has to write `q_learning`.
+- It checks what `q_learning` returns: a `(q, policy)` pair, a value for every action in every non-terminal state, and a valid action in `policy`. A problem prints one `ERROR:` line naming the `lab4_solution.py` line where possible.
+- It applies the skill's "learned" definition itself: a `learned` column per living cost, and a last line of `VERDICT: learned` or `VERDICT: not learned (...)`. Lab 5 left that judgment to Claude; a 4B model is more reliable acting on one clear line. The table columns are otherwise unchanged.
 - Usage text says `py -3` (`python3` is a Store stub on this machine; Python 3.12 there has numpy).
 - **Regression check:** with the Lab 5 solution saved as a temporary `lab4_solution.py`, the adapted script must reproduce the Lab 5 baseline. That baseline is 5 seeds, `alpha=0.05`, `epsilon=0.9`, 5000 episodes: goal rate 99.7–99.9% vs. 100% optimal, mean value error 0.11–0.16, about 6 s. Delete the temporary file afterwards. It is never committed or put in the live-run workspace.
 
