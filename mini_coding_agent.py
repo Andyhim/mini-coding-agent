@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -34,16 +35,27 @@ HELP_DETAILS = "\n".join(
 MAX_TOOL_OUTPUT = 4000
 MAX_HISTORY = 12000
 IGNORED_PATH_NAMES = {".git", ".mini-coding-agent", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
+SKILL_DIRS = ("skills", "skill", ".skills")
+SKILL_THRESHOLD = 0.20
+STOPWORDS = frozenset({
+    "a", "about", "an", "and", "any", "are", "as", "at", "be", "but", "by", "can", "could",
+    "do", "does", "for", "from", "has", "have", "how", "i", "if", "in", "into", "is", "it",
+    "its", "me", "my", "no", "not", "of", "on", "or", "our", "please", "should", "so", "than",
+    "that", "the", "their", "them", "then", "there", "these", "this", "those", "to", "up", "us",
+    "was", "we", "what", "when", "where", "which", "while", "who", "why", "will", "with",
+    "would", "you", "your",
+})
 
-##############################
-#### Six Agent Components ####
-##############################
+################################
+#### Seven Agent Components ####
+################################
 # 1) Live Repo Context -> WorkspaceContext
 # 2) Prompt Shape And Cache Reuse -> build_prefix, memory_text, prompt
 # 3) Structured Tools, Validation, And Permissions -> build_tools, run_tool, validate_tool, approve, parse, path, tool_*
 # 4) Context Reduction And Output Management -> clip, history_text
 # 5) Transcripts, Memory, And Resumption -> SessionStore, record, note_tool, ask, reset
 # 6) Delegation And Bounded Subagents -> tool_delegate
+# 7) Agent Skills -> Skill, SkillRegistry, skill_text, activate_skill, tool_use_skill
 
 
 def now():
@@ -222,6 +234,155 @@ class OllamaModelClient:
         return data.get("response", "")
 
 
+##############################
+#### 7) Agent Skills #########
+##############################
+def tokenize(text):
+    """Lowercase alphanumeric tokens, without stopwords or 1-character tokens."""
+    return [
+        token for token in re.findall(r"[a-z0-9]+", str(text).lower())
+        if len(token) > 1 and token not in STOPWORDS
+    ]
+
+
+def cosine(a, b):
+    """Cosine similarity of two sparse vectors stored as dicts."""
+    dot = sum(value * b.get(key, 0.0) for key, value in a.items())
+    norm = math.sqrt(sum(value * value for value in a.values())) * math.sqrt(sum(value * value for value in b.values()))
+    return dot / norm if norm else 0.0
+
+
+class Skill:
+    def __init__(self, name, description, body, path, triggers):
+        self.name = name
+        self.description = description
+        self.body = body
+        self.path = path
+        self.triggers = triggers
+
+
+class SkillRegistry:
+    """Finds <skills-dir>/<folder>/SKILL.md files, scores prompts against them, and logs decisions."""
+
+    def __init__(self, root, log_path, threshold=SKILL_THRESHOLD):
+        self.root = Path(root)
+        self.log_path = Path(log_path)
+        self.threshold = threshold
+        self.skills = self.discover()
+        self.idf = self.build_idf()
+        self.skill_vectors = {skill.name: self.vector(self.skill_text(skill)) for skill in self.skills}
+
+    def discover(self):
+        skills = []
+        for dirname in SKILL_DIRS:
+            base = self.root / dirname
+            if not base.is_dir():
+                continue
+            for folder in sorted(base.iterdir(), key=lambda item: item.name.lower()):
+                if not folder.is_dir():
+                    continue
+                path = next(
+                    (item for item in sorted(folder.iterdir()) if item.is_file() and item.name.lower() == "skill.md"),
+                    None,
+                )
+                if path is None:
+                    continue
+                meta, body = self.parse_skill_file(path.read_text(encoding="utf-8", errors="replace"))
+                name = meta.get("name") or folder.name
+                if self.get(name, skills) is not None:
+                    continue
+                skills.append(
+                    Skill(
+                        name=name,
+                        description=meta.get("description", ""),
+                        body=body,
+                        path=path.relative_to(self.root).as_posix(),
+                        triggers=[item.strip() for item in meta.get("triggers", "").split(",") if item.strip()],
+                    )
+                )
+        return skills
+
+    @staticmethod
+    def parse_skill_file(text):
+        """Split an optional `---` frontmatter block of `key: value` lines from the body."""
+        text = text.lstrip("﻿")
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {}, text.strip()
+        for index in range(1, len(lines)):
+            if lines[index].strip() != "---":
+                continue
+            meta = {}
+            for line in lines[1:index]:
+                key, sep, value = line.partition(":")
+                if sep and key.strip():
+                    meta[key.strip().lower()] = value.strip().strip("\"'")
+            return meta, "\n".join(lines[index + 1:]).strip()
+        return {}, text.strip()
+
+    @staticmethod
+    def skill_text(skill):
+        return " ".join([skill.name.replace("-", " "), skill.description, " ".join(skill.triggers)])
+
+    def build_idf(self):
+        document_frequency = {}
+        for skill in self.skills:
+            for token in set(tokenize(self.skill_text(skill))):
+                document_frequency[token] = document_frequency.get(token, 0) + 1
+        count = len(self.skills)
+        return {token: 1 + math.log((count + 1) / (1 + df)) for token, df in document_frequency.items()}
+
+    def vector(self, text):
+        unseen_idf = 1 + math.log(len(self.skills) + 1)
+        weights = {}
+        for token in tokenize(text):
+            weights[token] = weights.get(token, 0.0) + self.idf.get(token, unseen_idf)
+        return weights
+
+    def get(self, name, skills=None):
+        return next((skill for skill in (self.skills if skills is None else skills) if skill.name == name), None)
+
+    def scores(self, prompt):
+        """Score every skill against the prompt, highest first. Naming a skill scores 1.0."""
+        prompt_vector = self.vector(prompt)
+        lowered = str(prompt).lower()
+        results = {}
+        for skill in self.skills:
+            if skill.name.lower() in lowered:
+                score = 1.0
+            else:
+                score = cosine(prompt_vector, self.skill_vectors[skill.name])
+            results[skill.name] = round(score, 4)
+        return dict(sorted(results.items(), key=lambda item: item[1], reverse=True))
+
+    def match(self, prompt, source="prompt"):
+        if not self.skills:
+            return None
+        scores = self.scores(prompt)
+        best_name, best_score = next(iter(scores.items()))
+        selected = self.get(best_name) if best_score >= self.threshold else None
+        self.log(
+            {
+                "event": "similarity_check",
+                "source": source,
+                "prompt": prompt,
+                "scores": scores,
+                "threshold": self.threshold,
+                "selected": selected.name if selected else None,
+            }
+        )
+        return selected
+
+    def catalog(self):
+        lines = [f"- {skill.name}: {skill.description}" if skill.description else f"- {skill.name}" for skill in self.skills]
+        return "\n".join(lines) or "- none"
+
+    def log(self, entry):
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"created_at": now(), **entry}) + "\n")
+
+
 class MiniAgent:
     def __init__(
         self,
@@ -253,6 +414,9 @@ class MiniAgent:
             "history": [],
             "memory": {"task": "", "files": [], "notes": []},
         }
+        # Component 7 must exist before build_tools() and build_prefix() read it.
+        self.skills = SkillRegistry(self.root, self.root / ".mini-coding-agent" / "skills.log")
+        self.active_skill = None
         self.tools = self.build_tools()
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)
@@ -318,6 +482,13 @@ class MiniAgent:
                 "run": self.tool_patch_file,
             },
         }
+        if self.skills.skills:
+            tools["use_skill"] = {
+                "schema": {"name": "str"},
+                "risky": False,
+                "description": "Load an agent skill's SKILL.md instructions by name and follow them.",
+                "run": self.tool_use_skill,
+            }
         if self.depth < self.max_depth:
             tools["delegate"] = {
                 "schema": {"task": "str", "max_steps": "int=3"},
@@ -370,6 +541,7 @@ class MiniAgent:
             "Rules:\n" + rules,
             "Tools:\n" + tool_text,
             "Valid response examples:\n" + examples,
+            "Agent skills (call use_skill when one fits the task):\n" + self.skills.catalog(),
             self.workspace.text(),
         ])
 
@@ -423,6 +595,7 @@ class MiniAgent:
         return "\n\n".join([
             self.prefix,
             self.memory_text(),
+            self.skill_text(),
             "Transcript:\n" + self.history_text(),
             "Current user request:\n" + user_message,
         ])
@@ -447,6 +620,9 @@ class MiniAgent:
         if not memory["task"]:
             memory["task"] = clip(user_message.strip(), 300)
         self.record({"role": "user", "content": user_message, "created_at": now()})
+        skill = self.skills.match(user_message, source="prompt")
+        if skill is not None:
+            self.activate_skill(skill, trigger="prompt")
 
         tool_steps = 0
         attempts = 0
@@ -530,6 +706,7 @@ class MiniAgent:
             "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
             "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
             "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
+            "use_skill": '<tool>{"name":"use_skill","args":{"name":"skill-name"}}</tool>',
         }
         return examples.get(name, "")
 
@@ -589,6 +766,13 @@ class MiniAgent:
             count = text.count(old_text)
             if count != 1:
                 raise ValueError(f"old_text must occur exactly once, found {count}")
+            return
+
+        if name == "use_skill":
+            skill_name = str(args.get("name", "")).strip()
+            if self.skills.get(skill_name) is None:
+                available = ", ".join(skill.name for skill in self.skills.skills) or "none"
+                raise ValueError(f"unknown skill '{skill_name}'; available skills: {available}")
             return
 
         if name == "delegate":
@@ -679,6 +863,8 @@ class MiniAgent:
             args["content"] = body_text
         if name == "delegate" and "task" not in args and body_text:
             args["task"] = body_text.strip()
+        if name == "use_skill" and "name" not in args and body_text:
+            args["name"] = body_text.strip()
         return {"name": name, "args": args}
 
     @staticmethod
@@ -840,6 +1026,32 @@ class MiniAgent:
             raise ValueError(f"old_text must occur exactly once, found {count}")
         path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
         return f"patched {path.relative_to(self.root)}"
+
+    ###################################################
+    #### 7) Agent Skills ##############################
+    ###################################################
+    def skill_text(self):
+        skill = self.active_skill
+        if skill is None:
+            return "Active skill: none"
+        return "\n".join([
+            f"Active skill: {skill.name} (from {skill.path})",
+            "Follow these instructions step by step:",
+            skill.body,
+        ])
+
+    def activate_skill(self, skill, trigger):
+        # The only place where execution is logged, so both trigger paths log the same way.
+        self.active_skill = skill
+        self.remember(self.session["memory"]["notes"], f"skill active: {skill.name}", 5)
+        self.skills.log({"event": "skill_executed", "trigger": trigger, "skill": skill.name, "path": skill.path})
+
+    def tool_use_skill(self, args):
+        skill = self.skills.get(str(args.get("name", "")).strip())
+        if skill is None:
+            raise ValueError("unknown skill")
+        self.activate_skill(skill, trigger="agent")
+        return skill.body
 
     ###################################################
     #### 6) Delegation And Bounded Subagents ##########
